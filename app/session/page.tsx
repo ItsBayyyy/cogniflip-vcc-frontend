@@ -11,6 +11,8 @@ import { AuthGuard } from "@/components/auth-guard"
 import { hasApiStatus, speakText, streamMessage, transcribeAudio } from "@/lib/api"
 import { extractSentences, normalizeAssistantSpeech } from "@/lib/speech-text"
 import { useMicAmplitude } from "@/hooks/use-mic-amplitude"
+import { DemoLinesPanel } from "@/components/demo-lines-panel"
+import { DEMO_LINES, DEMO_MODE_ENABLED } from "@/lib/demo-mode"
 
 // A 0-sample WAV. Playing it inside the first press "unlocks" the <audio>
 // element on iOS Safari, whose autoplay policy otherwise rejects the reply's
@@ -246,55 +248,50 @@ function SessionInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setSessionPhase])
 
-  const stopRecordingAndProcess = useCallback(async () => {
-    const recorder = recorderRef.current
-    if (!recorder || recorder.state === "inactive") {
-      setSessionPhase("idle")
-      return
-    }
-
-    // Wait for the recorder to fully flush before reading chunks
-    const stopped = new Promise<void>((resolve) => {
-      recorder.onstop = () => resolve()
-    })
-    try {
-      recorder.stop()
-    } catch {
-      /* ignore */
-    }
-    await stopped
-    // Keep the mic stream live for the next press (session-lifetime stream);
-    // tracks are released in handleEnd and on unmount.
-
-    const blob = new Blob(chunksRef.current, {
-      type: recorder.mimeType || "audio/webm",
-    })
-    chunksRef.current = []
-
-    if (blob.size < 1000) {
-      // Too short / silent — tell the user instead of silently doing nothing.
-      setError("That was too short — hold the mic while you speak.")
-      setSessionPhase("idle")
-      return
-    }
-
-    // Tag this turn so we can detect interruptions in late-resolving awaits.
+  // Starts a new turn: bumps the generation token and resets the sentence
+  // queue. Returns a staleness check for the turn's late-resolving awaits.
+  const beginTurn = useCallback(() => {
     const myGen = ++genIdRef.current
-    const isStale = () => myGen !== genIdRef.current
-
-    // Fresh sentence queue for this turn.
     voiceQueueRef.current = []
     voiceStreamDoneRef.current = false
     voiceWaitersRef.current = []
+    return () => myGen !== genIdRef.current
+  }, [])
 
-    try {
-      setSessionPhase("transcribing")
-      const text = await transcribeAudio(blob, sessionId)
-      if (isStale()) return
-      if (!text || !text.trim()) {
-        setSessionPhase("idle")
+  const handleTurnError = useCallback(
+    (e: unknown) => {
+      // Aborts during interrupt are expected — stay silent.
+      if (e instanceof DOMException && e.name === "AbortError") return
+      // Expired session mid-conversation: the sliding-session heartbeat
+      // should have renewed the token, so this only happens after long
+      // inactivity or a sleeping device. Bounce to login instead of showing
+      // a dead-end generic error.
+      if (hasApiStatus(e, 401)) {
+        const next = `/session?${params.toString()}`
+        router.replace(`/login?next=${encodeURIComponent(next)}`)
         return
       }
+      speakAbortRef.current?.abort()
+      voiceQueueRef.current = []
+      voiceStreamDoneRef.current = true
+      voiceWaitersRef.current.splice(0).forEach((wake) => wake())
+      setError(
+        hasApiStatus(e, 409)
+          ? "Cogniflip is still finishing the previous reply. Try again in a moment."
+          : hasApiStatus(e, 429)
+            ? "You're talking faster than the rate limit allows. Wait a few seconds, then try again."
+            : "Something went wrong. Please try again.",
+      )
+      setSessionPhase("idle")
+    },
+    [params, router, setSessionPhase],
+  )
+
+  // Sends the user's line and plays the streamed reply. Shared by spoken
+  // turns (after transcription) and demo-mode typed lines. Throws on API
+  // errors; callers route them through handleTurnError.
+  const replyTo = useCallback(
+    async (text: string, isStale: () => boolean) => {
       setUserText(text)
 
       // Sentence-streamed reply: SSE chunks reveal text progressively and each
@@ -403,33 +400,58 @@ function SessionInner() {
       if (isStale()) return
       setAiText(reply)
       setSessionPhase("idle")
-    } catch (e) {
-      // Aborts during interrupt are expected — stay silent.
-      if (e instanceof DOMException && e.name === "AbortError") return
+    },
+    [sessionId, setSessionPhase],
+  )
+
+  const stopRecordingAndProcess = useCallback(async () => {
+    const recorder = recorderRef.current
+    if (!recorder || recorder.state === "inactive") {
+      setSessionPhase("idle")
+      return
+    }
+
+    // Wait for the recorder to fully flush before reading chunks
+    const stopped = new Promise<void>((resolve) => {
+      recorder.onstop = () => resolve()
+    })
+    try {
+      recorder.stop()
+    } catch {
+      /* ignore */
+    }
+    await stopped
+    // Keep the mic stream live for the next press (session-lifetime stream);
+    // tracks are released in handleEnd and on unmount.
+
+    const blob = new Blob(chunksRef.current, {
+      type: recorder.mimeType || "audio/webm",
+    })
+    chunksRef.current = []
+
+    if (blob.size < 1000) {
+      // Too short / silent — tell the user instead of silently doing nothing.
+      setError("That was too short — hold the mic while you speak.")
+      setSessionPhase("idle")
+      return
+    }
+
+    const isStale = beginTurn()
+
+    try {
+      setSessionPhase("transcribing")
+      const text = await transcribeAudio(blob, sessionId)
       if (isStale()) return
-      // Expired session mid-conversation: the sliding-session heartbeat
-      // should have renewed the token, so this only happens after long
-      // inactivity or a sleeping device. Bounce to login instead of showing
-      // a dead-end generic error.
-      if (hasApiStatus(e, 401)) {
-        const next = `/session?${params.toString()}`
-        router.replace(`/login?next=${encodeURIComponent(next)}`)
+      if (!text || !text.trim()) {
+        setSessionPhase("idle")
         return
       }
-      speakAbortRef.current?.abort()
-      voiceQueueRef.current = []
-      voiceStreamDoneRef.current = true
-      voiceWaitersRef.current.splice(0).forEach((wake) => wake())
-      setError(
-        hasApiStatus(e, 409)
-          ? "Cogniflip is still finishing the previous reply. Try again in a moment."
-          : hasApiStatus(e, 429)
-            ? "You're talking faster than the rate limit allows. Wait a few seconds, then try again."
-            : "Something went wrong. Please try again.",
-      )
-      setSessionPhase("idle")
+      await replyTo(text, isStale)
+    } catch (e) {
+      if (isStale()) return
+      handleTurnError(e)
     }
-  }, [sessionId, setSessionPhase, router, params])
+  }, [sessionId, setSessionPhase, beginTurn, replyTo, handleTurnError])
 
   // ----- Press / toggle handlers -----
   // These call start/stop directly so there's no race between `muted` state
@@ -485,6 +507,25 @@ function SessionInner() {
       handlePressStart()
     }
   }, [handlePressStart, handlePressEnd])
+
+  // Demo mode: send a prepared or typed line without the mic. The click is a
+  // user gesture, so it also unlocks audio for the spoken reply.
+  const sendDemoLine = useCallback(
+    async (line: string) => {
+      const text = line.trim()
+      if (!text || phaseRef.current !== "idle") return
+      unlockAudio()
+      setError(null)
+      const isStale = beginTurn()
+      try {
+        await replyTo(text, isStale)
+      } catch (e) {
+        if (isStale()) return
+        handleTurnError(e)
+      }
+    },
+    [unlockAudio, beginTurn, replyTo, handleTurnError],
+  )
 
   // On mobile, default to muted; on desktop, default to muted too (mic permission gate)
   useEffect(() => {
@@ -676,6 +717,16 @@ function SessionInner() {
           <WaveVisualizer active={phase === "recording" || phase === "speaking"} />
         </div>
 
+        {DEMO_MODE_ENABLED && (
+          <div className="px-6 sm:px-10 pb-6 max-w-2xl mx-auto w-full">
+            <DemoLinesPanel
+              lines={DEMO_LINES}
+              disabled={phase !== "idle"}
+              onSend={(text) => void sendDemoLine(text)}
+            />
+          </div>
+        )}
+
         <div className="pb-8 sm:pb-12">
           <ControlPanel
             muted={muted}
@@ -783,6 +834,14 @@ function SessionInner() {
               </div>
             </div>
           </div>
+
+          {DEMO_MODE_ENABLED && (
+            <DemoLinesPanel
+              lines={DEMO_LINES}
+              disabled={phase !== "idle"}
+              onSend={(text) => void sendDemoLine(text)}
+            />
+          )}
 
           <ControlPanel
             muted={muted}

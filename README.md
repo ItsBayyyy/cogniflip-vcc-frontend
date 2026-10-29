@@ -135,8 +135,21 @@ Aplikasi tersedia di `http://localhost:3000`.
 |---|---:|---|---|
 | `COGNIFLIP_API_BASE_URL` | Ya | Server-only | Base URL FastAPI beserta prefix `/api/v1`. |
 | `SITE_URL` | Ya | Server-only | Base URL publik frontend untuk metadata. |
+| `NEXT_PUBLIC_DEMO_MODE` | Tidak | Public (build time) | `true` menampilkan panel **Demo lines** di halaman sesi. Default tersembunyi. |
+| `NEXT_PUBLIC_DEMO_LINES` | Tidak | Public (build time) | Kalimat siap pakai untuk panel demo, dipisah `\|`. |
 
 Jangan mengubah kedua variable tersebut menjadi `NEXT_PUBLIC_*`. API key, JWT secret, database URL, dan kredensial provider tidak boleh ditempatkan pada environment frontend.
+
+### Mode demo panggung
+
+Untuk demo di ruangan bising, aktifkan `NEXT_PUBLIC_DEMO_MODE=true`. Halaman sesi akan menampilkan panel **Demo lines**: tombol kalimat siap pakai dari `NEXT_PUBLIC_DEMO_LINES` plus kotak ketik. Kalimat dikirim tanpa mikrofon, tetapi balasan Cogniflip tetap di-stream, dibacakan dengan suara, dan sesinya tetap bisa dievaluasi. Push-to-talk tetap tersedia.
+
+```env
+NEXT_PUBLIC_DEMO_MODE=true
+NEXT_PUBLIC_DEMO_LINES=Photosynthesis is how plants turn sunlight into food.|Think of chlorophyll like a solar panel on every leaf.|So the plant stores that energy as sugar for later.
+```
+
+Nilai `NEXT_PUBLIC_*` ditanam saat build, jadi setelah mengubahnya jalankan ulang `pnpm build` atau redeploy di Vercel. Isinya terlihat di browser, jadi jangan menaruh data rahasia di sana.
 
 Tombol demo juri dikendalikan oleh `DEMO_LOGIN_ENABLED=true` pada environment **backend Render**, bukan Vercel.
 
